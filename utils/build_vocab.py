@@ -3,6 +3,18 @@ import pickle
 from collections import Counter
 
 
+class _CompatUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        if module == "__main__" and name in {"TorchVocab", "Vocab", "WordVocab"}:
+            return globals()[name]
+        return super().find_class(module, name)
+
+
+def _load_vocab_pickle(vocab_path: str):
+    with open(vocab_path, "rb") as f:
+        return _CompatUnpickler(f).load()
+
+
 class TorchVocab(object):
     """
     :property freqs: collections.Counter, コーパス中の単語の出現頻度を保持するオブジェクト
@@ -94,8 +106,7 @@ class Vocab(TorchVocab):
 
     @staticmethod
     def load_vocab(vocab_path: str) -> 'Vocab':
-        with open(vocab_path, "rb") as f:
-            return pickle.load(f)
+        return _load_vocab_pickle(vocab_path)
 
     def save_vocab(self, vocab_path):
         with open(vocab_path, "wb") as f:
@@ -150,8 +161,7 @@ class WordVocab(Vocab):
 
     @staticmethod
     def load_vocab(vocab_path: str) -> 'WordVocab':
-        with open(vocab_path, "rb") as f:
-            return pickle.load(f)
+        return _load_vocab_pickle(vocab_path)
 
 
 def main():
