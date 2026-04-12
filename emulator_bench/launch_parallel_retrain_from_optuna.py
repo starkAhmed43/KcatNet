@@ -405,13 +405,17 @@ def _run_experiment(exp: dict, args, hparams: dict, gpu_id: str) -> dict:
         },
     )
 
-    train_cmd = _train_command(exp, args, hparams, device)
-    _run_logged_command(
-        train_cmd,
-        logs_dir / "train.log",
-        env=env,
-        live_output=args.live_train_logs,
-    )
+    if args.overwrite or not ckpt_path.exists():
+        train_cmd = _train_command(exp, args, hparams, device)
+        _run_logged_command(
+            train_cmd,
+            logs_dir / "train.log",
+            env=env,
+            live_output=args.live_train_logs,
+        )
+    else:
+        with open(logs_dir / "train.log", "a") as handle:
+            handle.write("\n[launcher] Reusing existing checkpoint; skipping training step.\n")
 
     if not ckpt_path.exists():
         raise FileNotFoundError(f"Missing checkpoint after training: {ckpt_path}")

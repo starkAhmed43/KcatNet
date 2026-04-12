@@ -76,9 +76,12 @@ def main(args):
         for batch in tqdm(loader, desc="Predict", unit="batch"):
             with _autocast_context(device, autocast_dtype=autocast_dtype):
                 reg_pred, _ = _forward_model(model, batch, device)
-            preds.extend(reg_pred.squeeze().detach().cpu().numpy().reshape(-1).tolist())
+            # NumPy cannot consume bfloat16 tensors directly; cast before host conversion.
+            pred_values = reg_pred.squeeze().detach().to(dtype=torch.float32).cpu().numpy().reshape(-1)
+            preds.extend(pred_values.tolist())
             if target_col is not None:
-                labels.extend(batch.reg_y.numpy().reshape(-1).tolist())
+                label_values = batch.reg_y.detach().to(dtype=torch.float32).cpu().numpy().reshape(-1)
+                labels.extend(label_values.tolist())
 
     output = frame.copy()
     output["pred_log10_value"] = preds

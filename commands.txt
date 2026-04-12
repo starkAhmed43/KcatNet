@@ -897,6 +897,7 @@ conda run -n mldb python emulator_bench/launch_parallel_retrain_from_optuna.py \
 # --output_root
 #   default: /home/adhil/github/EMULaToR/data/processed/baselines/KcatNet/retrain_from_optuna/<study_name>
 #   values: custom output root if you want results elsewhere
+#   note: on rerun (without --overwrite), existing bestmodel.pth is reused and only missing predict/metrics steps are executed
 #
 # Per-run outputs (each split/seed has its own directory):
 #   train/
