@@ -20,7 +20,12 @@ if str(REPO_ROOT) not in sys.path:
 
 DEFAULT_BASE_DIR = Path("/home/adhil/github/EMULaToR/data/processed/baselines/KcatNet")
 DEFAULT_EMBEDDINGS_DIR = DEFAULT_BASE_DIR / "embeddings"
-DEFAULT_SPLIT_GROUPS = ["random_splits", "enzyme_sequence_splits", "substrate_splits"]
+DEFAULT_SPLIT_GROUPS = [
+    "random_splits",
+    "enzyme_sequence_splits",
+    "substrate_splits",
+    "group_shuffle_splits",
+]
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config_KcatNet.json"
 
 
@@ -150,7 +155,7 @@ def discover_split_jobs(
         if not group_dir.exists():
             continue
 
-        if split_group == "random_splits":
+        if split_group == "random_splits" or split_group == "group_shuffle_splits":
             train_path = _find_split_file(group_dir, "train")
             val_path = _find_split_file(group_dir, "val")
             test_path = _find_split_file(group_dir, "test")
@@ -158,8 +163,16 @@ def discover_split_jobs(
                 jobs.append(
                     {
                         "split_group": split_group,
-                        "split_name": "random",
-                        "difficulty": "random",
+                        "split_name": (
+                            "random"
+                            if split_group == "random_splits"
+                            else "group_shuffle"
+                        ),
+                        "difficulty": (
+                            "random"
+                            if split_group == "random_splits"
+                            else "group_shuffle"
+                        ),
                         "root_dir": str(group_dir),
                         "train_path": str(train_path),
                         "val_path": str(val_path),
