@@ -163,7 +163,7 @@ def embed_prot_t5_batch(
     device: torch.device,
 ) -> Dict[str, np.ndarray]:
     tokenized = [" ".join(list(seq)) for seq in sequences]
-    encoding = tokenizer.batch_encode_plus(tokenized, add_special_tokens=True, padding="longest")
+    encoding = tokenizer(tokenized, add_special_tokens=True, padding="longest")
     input_ids = torch.tensor(encoding["input_ids"], device=device)
     attention_mask = torch.tensor(encoding["attention_mask"], device=device)
 

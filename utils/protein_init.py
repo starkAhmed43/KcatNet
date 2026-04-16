@@ -65,7 +65,7 @@ def get_embeddings(model, tokenizer, seqs, per_residue, per_protein,  max_residu
             batch = list()
 
             # add_special_tokens adds extra token at the end of each sequence
-            token_encoding = tokenizer.batch_encode_plus(seqs, add_special_tokens=True, padding="longest")
+            token_encoding = tokenizer(seqs, add_special_tokens=True, padding="longest")
             input_ids = torch.tensor(token_encoding['input_ids']).to(device)
             attention_mask = torch.tensor(token_encoding['attention_mask']).to(device)
 
