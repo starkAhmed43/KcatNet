@@ -22,7 +22,7 @@ from emulator_bench.common import (
     discover_split_jobs,
     normalize_threshold_args,
 )
-from emulator_bench.tune_optuna import maybe_cache_embeddings
+from emulator_bench.tune_optuna import load_training_config, maybe_cache_embeddings, optimizer_defaults_from_config
 
 
 TRAIN_SCRIPT = REPO_ROOT / "emulator_bench" / "train_single_target_tvt.py"
@@ -163,6 +163,8 @@ def _load_best_hparams(args):
 
 
 def _resolve_training_hparams(raw_hparams: dict, args) -> dict:
+    config_defaults = args.config_optimizer_defaults
+
     def choose(key: str, fallback):
         value = raw_hparams.get(key, fallback)
         override = getattr(args, key)
@@ -172,24 +174,24 @@ def _resolve_training_hparams(raw_hparams: dict, args) -> dict:
 
     resolved = {
         "batch_size": int(choose("batch_size", 16)),
-        "lr": float(choose("lr", 1e-4)),
-        "weight_decay": float(choose("weight_decay", 1e-2)),
-        "beta1": float(choose("beta1", 0.9)),
-        "beta2": float(choose("beta2", 0.999)),
-        "eps": float(choose("eps", 1e-8)),
-        "scheduler": str(choose("scheduler", "cosine")),
+        "lr": float(choose("lr", config_defaults["lr"])),
+        "weight_decay": float(choose("weight_decay", config_defaults["weight_decay"])),
+        "beta1": float(choose("beta1", config_defaults["beta1"])),
+        "beta2": float(choose("beta2", config_defaults["beta2"])),
+        "eps": float(choose("eps", config_defaults["eps"])),
+        "scheduler": str(choose("scheduler", config_defaults["scheduler"])),
         "lr_decay_factor": float(choose("lr_decay_factor", 0.5)),
         "lr_decay_patience": int(choose("lr_decay_patience", 5)),
-        "min_lr": float(choose("min_lr", 0.0)),
-        "lr_warmup_epochs": int(choose("lr_warmup_epochs", 3)),
+        "min_lr": float(choose("min_lr", config_defaults["min_lr"])),
+        "lr_warmup_epochs": int(choose("lr_warmup_epochs", config_defaults["lr_warmup_epochs"])),
         "lr_warmup_start_factor": float(choose("lr_warmup_start_factor", 0.1)),
-        "clip_grad": float(choose("clip_grad", 1.0)),
+        "clip_grad": float(choose("clip_grad", config_defaults["clip_grad"])),
         "regression_weight": float(choose("regression_weight", 0.9)),
         "cluster_weight": float(choose("cluster_weight", 0.1)),
         "patience": int(choose("patience", 0)),
         "min_delta": float(choose("min_delta", 0.0)),
     }
-    raw_amsgrad = raw_hparams.get("amsgrad", False)
+    raw_amsgrad = raw_hparams.get("amsgrad", config_defaults["amsgrad"])
     resolved["amsgrad"] = bool(args.amsgrad or raw_amsgrad)
     return resolved
 
@@ -505,7 +507,7 @@ def _run_parallel(experiments: list[dict], args, hparams: dict) -> list[dict]:
     results: list[dict] = []
     result_lock = threading.Lock()
 
-    def worker(gpu_id: str) -> None:
+    def worker(gpu_id: str, slot_idx: int) -> None:
         while True:
             try:
                 exp = queue.get_nowait()
@@ -513,14 +515,16 @@ def _run_parallel(experiments: list[dict], args, hparams: dict) -> list[dict]:
                 return
 
             run_label = f"{exp['split_group']}/{exp['split_name']}/seed_{exp['seed']}"
-            print(f"[GPU {gpu_id}] Starting {run_label}", flush=True)
+            worker_label = f"GPU {gpu_id} slot {slot_idx}"
+            print(f"[{worker_label}] Starting {run_label}", flush=True)
             try:
                 result = _run_experiment(exp, args, hparams, gpu_id)
-                print(f"[GPU {gpu_id}] Finished {run_label}: {result['status']}", flush=True)
+                print(f"[{worker_label}] Finished {run_label}: {result['status']}", flush=True)
             except Exception as exc:
                 result = {
                     "status": "failed",
                     "gpu_id": gpu_id,
+                    "gpu_slot": slot_idx,
                     "error": str(exc),
                     "run_dir": str(exp["run_dir"]),
                     "split_group": exp["split_group"],
@@ -528,16 +532,19 @@ def _run_parallel(experiments: list[dict], args, hparams: dict) -> list[dict]:
                     "difficulty": exp["difficulty"],
                     "seed": exp["seed"],
                 }
-                print(f"[GPU {gpu_id}] Failed {run_label}: {exc}", flush=True)
+                print(f"[{worker_label}] Failed {run_label}: {exc}", flush=True)
+            else:
+                result["gpu_slot"] = slot_idx
             with result_lock:
                 results.append(result)
             queue.task_done()
 
     threads = []
     for gpu_id in args.gpus:
-        thread = threading.Thread(target=worker, args=(str(gpu_id),), daemon=True)
-        thread.start()
-        threads.append(thread)
+        for slot_idx in range(args.runs_per_gpu):
+            thread = threading.Thread(target=worker, args=(str(gpu_id), slot_idx), daemon=True)
+            thread.start()
+            threads.append(thread)
 
     for thread in threads:
         thread.join()
@@ -603,9 +610,10 @@ def _write_global_summaries(output_root: Path, results: list[dict]) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Extract best Optuna hparams and retrain KcatNet jobs in parallel (one experiment per GPU)."
+        description="Extract best Optuna hparams and retrain KcatNet jobs in parallel."
     )
     parser.add_argument("--gpus", nargs="+", required=True, help="GPU ids, e.g. --gpus 0 1 2 3")
+    parser.add_argument("--runs_per_gpu", type=int, default=1, help="How many experiments to run concurrently on each listed GPU.")
     parser.add_argument("--base_dir", type=str, default=str(DEFAULT_BASE_DIR))
     parser.add_argument("--embeddings_dir", type=str, default=str(DEFAULT_EMBEDDINGS_DIR))
     parser.add_argument("--config_path", type=str, default=str(REPO_ROOT / "config_KcatNet.json"))
@@ -618,6 +626,11 @@ def main():
     parser.add_argument("--split_groups", nargs="+", default=DEFAULT_SPLIT_GROUPS)
     parser.add_argument("--threshold", type=str, default=None)
     parser.add_argument("--thresholds", nargs="+", default=None)
+    parser.add_argument(
+        "--all_thresholds",
+        action="store_true",
+        help="Use every discovered threshold under the requested split groups.",
+    )
     parser.add_argument("--seeds", nargs="+", type=int, required=True)
 
     parser.add_argument("--sequence_col", type=str, default="sequence")
@@ -681,10 +694,15 @@ def main():
     )
     args = parser.parse_args()
 
+    if args.runs_per_gpu <= 0:
+        parser.error("--runs_per_gpu must be a positive integer.")
+
     if not args.hparams_json and not args.storage:
         parser.error("Provide either --hparams_json or --storage to select best hyperparameters.")
 
-    args.thresholds = normalize_threshold_args(args.thresholds, args.threshold)
+    args.thresholds = None if args.all_thresholds else normalize_threshold_args(args.thresholds, args.threshold)
+    args.model_config = load_training_config(args.config_path)
+    args.config_optimizer_defaults = optimizer_defaults_from_config(args.model_config)
 
     jobs = discover_split_jobs(Path(args.base_dir), split_groups=args.split_groups, thresholds=args.thresholds)
     if not jobs:
@@ -702,6 +720,8 @@ def main():
             "raw_hparams": raw_hparams,
             "resolved_train_hparams": resolved_hparams,
             "epochs": args.epochs,
+            "config_path": args.config_path,
+            "config_optimizer_defaults": args.config_optimizer_defaults,
         },
     )
 

@@ -111,7 +111,32 @@ def maybe_cache_embeddings(args):
     subprocess.run(cmd, check=True, cwd=str(REPO_ROOT))
 
 
+def load_training_config(config_path: str | Path) -> dict:
+    with open(config_path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def optimizer_defaults_from_config(config: dict) -> dict:
+    optimizer_cfg = dict(config.get("optimizer", {}))
+    betas = optimizer_cfg.get("betas", [0.9, 0.999])
+    scheduler = "cosine" if optimizer_cfg.get("schedule_lr", False) else "none"
+    return {
+        "lr": float(optimizer_cfg.get("lrate", 1e-4)),
+        "weight_decay": float(optimizer_cfg.get("weight_decay", 1e-2)),
+        "beta1": float(betas[0]),
+        "beta2": float(betas[1]),
+        "eps": float(optimizer_cfg.get("eps", 1e-8)),
+        "amsgrad": bool(optimizer_cfg.get("amsgrad", False)),
+        "scheduler": scheduler,
+        "min_lr": float(optimizer_cfg.get("min_lrate", 0.0)),
+        "lr_warmup_epochs": 0,
+        "lr_warmup_start_factor": 0.1,
+        "clip_grad": float(optimizer_cfg.get("clip", 1.0)),
+    }
+
+
 def suggest_hparams(trial: optuna.Trial, args) -> dict:
+    config_defaults = args.config_optimizer_defaults
     batch_size = int(args.batch_size) if args.batch_size is not None else trial.suggest_categorical("batch_size", [8, 16, 32])
     hparams = {
         "batch_size": batch_size,
@@ -122,11 +147,11 @@ def suggest_hparams(trial: optuna.Trial, args) -> dict:
         "lr_warmup_start_factor": trial.suggest_float("lr_warmup_start_factor", 0.05, 0.5),
         "clip_grad": trial.suggest_categorical("clip_grad", [0.5, 1.0, 2.0, 5.0]),
         "patience": trial.suggest_categorical("patience", [0, 10, 20, 30]),
-        "scheduler": "cosine",
-        "beta1": 0.9,
-        "beta2": 0.999,
-        "eps": 1e-8,
-        "amsgrad": False,
+        "scheduler": config_defaults["scheduler"],
+        "beta1": config_defaults["beta1"],
+        "beta2": config_defaults["beta2"],
+        "eps": config_defaults["eps"],
+        "amsgrad": config_defaults["amsgrad"],
         "regression_weight": 0.9,
         "cluster_weight": 0.1,
         "min_delta": 0.0,
@@ -265,6 +290,11 @@ def main():
     parser.add_argument("--split_groups", nargs="+", default=DEFAULT_SPLIT_GROUPS)
     parser.add_argument("--threshold", type=str, default=None)
     parser.add_argument("--thresholds", nargs="+", default=None)
+    parser.add_argument(
+        "--all_thresholds",
+        action="store_true",
+        help="Use every discovered threshold under the requested split groups.",
+    )
     parser.add_argument("--max_jobs", type=int, default=0, help="Limit the number of split jobs used for each trial. 0 means all.")
     parser.add_argument("--sequence_col", type=str, default="sequence")
     parser.add_argument("--smiles_col", type=str, default="smiles")
@@ -305,7 +335,9 @@ def main():
     parser.add_argument("--storage", type=str, default=None)
     parser.add_argument("--reset_storage", action="store_true")
     args = parser.parse_args()
-    args.thresholds = normalize_threshold_args(args.thresholds, args.threshold)
+    args.thresholds = None if args.all_thresholds else normalize_threshold_args(args.thresholds, args.threshold)
+    args.model_config = load_training_config(args.config_path)
+    args.config_optimizer_defaults = optimizer_defaults_from_config(args.model_config)
 
     jobs = discover_split_jobs(Path(args.base_dir), split_groups=args.split_groups, thresholds=args.thresholds)
     if not jobs:
@@ -369,9 +401,16 @@ def main():
             "thresholds": args.thresholds,
             "seeds": list(args.seeds),
             "batch_size": args.batch_size if args.batch_size is not None else study.best_params.get("batch_size"),
+            "config_path": args.config_path,
+            "config_optimizer_defaults": args.config_optimizer_defaults,
         }
     )
-    best_payload.setdefault("scheduler", "cosine")
+    best_payload.setdefault("scheduler", args.config_optimizer_defaults["scheduler"])
+    best_payload.setdefault("beta1", args.config_optimizer_defaults["beta1"])
+    best_payload.setdefault("beta2", args.config_optimizer_defaults["beta2"])
+    best_payload.setdefault("eps", args.config_optimizer_defaults["eps"])
+    best_payload.setdefault("amsgrad", args.config_optimizer_defaults["amsgrad"])
+    best_payload.setdefault("clip_grad", args.config_optimizer_defaults["clip_grad"])
     best_payload.setdefault("lr_decay_factor", 0.5)
     best_payload.setdefault("lr_decay_patience", 5)
 

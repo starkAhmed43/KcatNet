@@ -17,6 +17,7 @@ from emulator_bench.tune_optuna import (
     maybe_cache_embeddings,
     prepare_optuna_storage,
 )
+from emulator_bench.common import normalize_threshold_args
 
 
 TUNE_SCRIPT = REPO_ROOT / "emulator_bench" / "tune_optuna.py"
@@ -26,6 +27,16 @@ def _split_trials(total_trials: int, num_workers: int) -> list[int]:
     base = total_trials // num_workers
     remainder = total_trials % num_workers
     return [base + (1 if idx < remainder else 0) for idx in range(num_workers)]
+
+
+def _resolve_total_trials(args) -> int:
+    if args.trials_per_gpu is not None:
+        if args.trials_per_gpu <= 0:
+            raise ValueError("--trials_per_gpu must be a positive integer")
+        return args.trials_per_gpu * len(args.gpus)
+    if args.n_trials is None or args.n_trials <= 0:
+        raise ValueError("Provide a positive --n_trials or --trials_per_gpu")
+    return args.n_trials
 
 
 def _build_worker_cmd(args, gpu_id: str, worker_index: int, worker_trials: int) -> list[str]:
@@ -110,6 +121,11 @@ def main():
     parser.add_argument("--split_groups", nargs="+", default=None)
     parser.add_argument("--threshold", type=str, default=None)
     parser.add_argument("--thresholds", nargs="+", default=None)
+    parser.add_argument(
+        "--all_thresholds",
+        action="store_true",
+        help="Use every discovered threshold under the requested split groups.",
+    )
     parser.add_argument("--sequence_col", type=str, default="sequence")
     parser.add_argument("--smiles_col", type=str, default="smiles")
     parser.add_argument("--target_col", type=str, default="log10_value")
@@ -137,7 +153,8 @@ def main():
     parser.add_argument("--ligand_batch_size", type=int, default=256)
     parser.add_argument("--metric", type=str, default="rmse", choices=["rmse", "pearson", "spearman", "r2_score", "mae", "mse"])
     parser.add_argument("--eval_split", type=str, default="val", choices=["val", "test"])
-    parser.add_argument("--n_trials", type=int, required=True, help="Total trials to distribute across all GPU workers.")
+    parser.add_argument("--n_trials", type=int, default=None, help="Total trials to distribute across all GPU workers.")
+    parser.add_argument("--trials_per_gpu", type=int, default=None, help="Trials assigned to each GPU worker.")
     parser.add_argument("--sampler_seed", type=int, default=42)
     parser.add_argument("--study_name", type=str, default="kcatnet_optuna")
     parser.add_argument("--storage", type=str, required=True, help="Shared Optuna storage. Required for parallel workers.")
@@ -145,14 +162,13 @@ def main():
     parser.add_argument("--stagger_seconds", type=float, default=3.0, help="Delay between worker launches to reduce DB startup contention.")
     args = parser.parse_args()
 
-    if args.n_trials <= 0:
-        raise ValueError("--n_trials must be a positive integer")
     if not args.gpus:
         raise ValueError("At least one GPU id must be provided via --gpus")
 
-    args.thresholds = [args.threshold] if args.threshold and not args.thresholds else args.thresholds
+    args.thresholds = None if args.all_thresholds else normalize_threshold_args(args.thresholds, args.threshold)
     if args.device.startswith("cuda") and len(args.gpus) < 1:
         raise ValueError("CUDA device requested but no GPU ids were provided")
+    total_trials = _resolve_total_trials(args)
 
     maybe_cache_embeddings(args)
     prepare_optuna_storage(args)
@@ -164,10 +180,10 @@ def main():
         sampler=optuna.samplers.TPESampler(seed=args.sampler_seed),
     )
 
-    trial_splits = _split_trials(args.n_trials, len(args.gpus))
+    trial_splits = _split_trials(total_trials, len(args.gpus))
     workers = [(gpu_id, worker_trials) for gpu_id, worker_trials in zip(args.gpus, trial_splits) if worker_trials > 0]
     if not workers:
-        raise RuntimeError("No worker received any trials. Increase --n_trials or reduce the number of --gpus.")
+        raise RuntimeError("No worker received any trials. Increase --n_trials/--trials_per_gpu or reduce the number of --gpus.")
 
     procs: list[tuple[str, int, subprocess.Popen]] = []
     try:

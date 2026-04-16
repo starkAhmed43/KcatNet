@@ -924,3 +924,16 @@ conda run -n mldb python emulator_bench/launch_parallel_retrain_from_optuna.py \
 #   all_tvt_metrics.csv
 #   aggregate_tvt_metrics.csv
 #   aggregate_test_metrics_ranked.csv
+
+
+python emulator_bench/launch_parallel_retrain_from_optuna.py \
+  --gpus 2 3 \
+  --base_dir /home/da24s023/github/EMULaToR/data/processed/baselines/KcatNet \
+  --embeddings_dir /home/da24s023/github/EMULaToR/data/processed/baselines/KcatNet/embeddings \
+  --config_path /home/mallikarjun/github/KcatNet/config_KcatNet.json \
+  --hparams_json /home/mallikarjun/github/KcatNet/emulator_bench/kcatnet_repo_defaults_hparams.json \
+  --split_groups enzyme_sequence_splits substrate_splits enzyme_structure_splits conformer_cosine_splits random_splits uniprot_time_splits \
+  --seeds 666 777 888 \
+  --epochs 80 \
+  --batch_size 16 \
+  --runs_per_gpu 2
