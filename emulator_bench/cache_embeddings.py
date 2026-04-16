@@ -1,7 +1,9 @@
 import argparse
+import multiprocessing as mp
 import time
 import sys
 from pathlib import Path
+from typing import Iterable, List
 
 import numpy as np
 import torch
@@ -56,25 +58,36 @@ def _save_npz(path: Path, item: dict) -> None:
     tmp_path.replace(path)
 
 
-def cache_proteins(args, sequences):
-    pending = [seq for seq in sequences if args.overwrite or not protein_cache_path(args.embeddings_dir, seq).exists()]
-    if not pending:
-        print("Protein cache is already complete.")
-        return {"proteins_total": len(sequences), "proteins_written": 0}
+def _parse_device_list(device_arg: str | None, fallback_device: str) -> List[str]:
+    if not device_arg:
+        return [fallback_device]
+    devices = [item.strip() for item in device_arg.split(",") if item.strip()]
+    return devices or [fallback_device]
 
-    device = torch.device(args.device)
-    print(f"Protein cache device: {device}")
+
+def _split_sequences_for_devices(sequences: Iterable[str], device_count: int) -> List[List[str]]:
+    shards: List[List[str]] = [[] for _ in range(device_count)]
+    shard_loads = [0 for _ in range(device_count)]
+    for sequence in sorted(sequences, key=len, reverse=True):
+        target_idx = min(range(device_count), key=lambda idx: shard_loads[idx])
+        shards[target_idx].append(sequence)
+        shard_loads[target_idx] += len(sequence)
+    return shards
+
+
+def _cache_proteins_single_device(args, sequences, device_str: str, worker_name: str = "main"):
+    device = torch.device(device_str)
+    print(f"[{worker_name}] Protein cache device: {device}")
     prot_t5_model, prot_t5_tokenizer = load_prot_t5(args.prot_t5_model, device)
     esm_model, batch_converter = load_esm_model(device)
-
     written = 0
     prot_t5_batches = build_prot_t5_batches(
-        pending,
+        sequences,
         max_residues=args.prot_t5_max_residues,
         max_seq_len=args.prot_t5_max_seq_len,
         max_batch=args.prot_t5_max_batch,
     )
-    batch_iter = tqdm(prot_t5_batches, desc="Caching protein embeddings", unit="batch")
+    batch_iter = tqdm(prot_t5_batches, desc=f"Caching protein embeddings ({worker_name})", unit="batch")
     for batch in batch_iter:
         prot5_by_sequence = embed_prot_t5_batch(prot_t5_model, prot_t5_tokenizer, batch, device)
         for sequence in batch:
@@ -88,7 +101,58 @@ def cache_proteins(args, sequences):
             )
             _save_npz(protein_cache_path(args.embeddings_dir, sequence), cache_item)
             written += 1
-            batch_iter.set_postfix(written=written, remaining=len(pending) - written)
+            batch_iter.set_postfix(written=written, remaining=len(sequences) - written)
+    return written
+
+
+def _cache_proteins_worker(args_dict, sequences, device_str: str, worker_idx: int):
+    namespace = argparse.Namespace(**args_dict)
+    worker_name = f"gpu-{worker_idx}:{device_str}"
+    written = _cache_proteins_single_device(namespace, sequences, device_str, worker_name=worker_name)
+    return {
+        "worker": worker_name,
+        "device": device_str,
+        "assigned": len(sequences),
+        "written": written,
+    }
+
+
+def cache_proteins(args, sequences):
+    pending = [seq for seq in sequences if args.overwrite or not protein_cache_path(args.embeddings_dir, seq).exists()]
+    if not pending:
+        print("Protein cache is already complete.")
+        return {"proteins_total": len(sequences), "proteins_written": 0}
+
+    protein_devices = _parse_device_list(args.protein_devices, args.device)
+    print(f"Protein cache devices: {', '.join(protein_devices)}")
+    if len(protein_devices) == 1:
+        written = _cache_proteins_single_device(args, pending, protein_devices[0])
+        return {"proteins_total": len(sequences), "proteins_written": written}
+
+    if any(not device.startswith("cuda") for device in protein_devices):
+        raise ValueError("Multi-GPU protein caching requires CUDA devices, for example --protein_devices cuda:0,cuda:1")
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is not available, but multiple protein devices were requested.")
+
+    shards = [shard for shard in _split_sequences_for_devices(pending, len(protein_devices)) if shard]
+    worker_devices = protein_devices[: len(shards)]
+    args_dict = vars(args).copy()
+    ctx = mp.get_context("spawn")
+    with ctx.Pool(processes=len(shards)) as pool:
+        worker_stats = pool.starmap(
+            _cache_proteins_worker,
+            [
+                (args_dict, shard, device_str, worker_idx)
+                for worker_idx, (shard, device_str) in enumerate(zip(shards, worker_devices))
+            ],
+        )
+
+    written = sum(item["written"] for item in worker_stats)
+    for item in worker_stats:
+        print(
+            f"[{item['worker']}] assigned {item['assigned']} sequences, "
+            f"wrote {item['written']} cache files"
+        )
 
     return {"proteins_total": len(sequences), "proteins_written": written}
 
@@ -125,6 +189,12 @@ def main():
     parser.add_argument("--sequence_col", type=str, default="sequence")
     parser.add_argument("--smiles_col", type=str, default="smiles")
     parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu")
+    parser.add_argument(
+        "--protein_devices",
+        type=str,
+        default=None,
+        help="Comma-separated devices for protein caching, e.g. cuda:0,cuda:1. Defaults to --device.",
+    )
     parser.add_argument("--prot_t5_model", type=str, default="Rostlab/prot_t5_xl_uniref50")
     parser.add_argument("--prot_t5_max_residues", type=int, default=4000)
     parser.add_argument("--prot_t5_max_seq_len", type=int, default=1000)
@@ -160,6 +230,7 @@ def main():
         "smiles_col": args.smiles_col,
         "split_groups": list(args.split_groups),
         "thresholds": args.thresholds,
+        "protein_devices": _parse_device_list(args.protein_devices, args.device),
         "protein_dtype": args.protein_dtype,
         "prot_t5_model": args.prot_t5_model,
         "protein_max_len": 1000,
