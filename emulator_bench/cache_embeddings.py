@@ -1,7 +1,10 @@
 import argparse
+import json
 import multiprocessing as mp
+import tempfile
 import time
 import sys
+import traceback
 from pathlib import Path
 from typing import Iterable, List
 
@@ -117,6 +120,22 @@ def _cache_proteins_worker(args_dict, sequences, device_str: str, worker_idx: in
     }
 
 
+def _cache_proteins_worker_to_file(args_dict, sequences, device_str: str, worker_idx: int, stats_path: str):
+    try:
+        stats = _cache_proteins_worker(args_dict, sequences, device_str, worker_idx)
+        payload = {"ok": True, "stats": stats}
+    except Exception as exc:
+        payload = {
+            "ok": False,
+            "worker": f"gpu-{worker_idx}:{device_str}",
+            "device": device_str,
+            "assigned": len(sequences),
+            "error": f"{type(exc).__name__}: {exc}",
+            "traceback": traceback.format_exc(),
+        }
+    save_json(Path(stats_path), payload)
+
+
 def cache_proteins(args, sequences):
     pending = [seq for seq in sequences if args.overwrite or not protein_cache_path(args.embeddings_dir, seq).exists()]
     if not pending:
@@ -138,14 +157,38 @@ def cache_proteins(args, sequences):
     worker_devices = protein_devices[: len(shards)]
     args_dict = vars(args).copy()
     ctx = mp.get_context("spawn")
-    with ctx.Pool(processes=len(shards)) as pool:
-        worker_stats = pool.starmap(
-            _cache_proteins_worker,
-            [
-                (args_dict, shard, device_str, worker_idx)
-                for worker_idx, (shard, device_str) in enumerate(zip(shards, worker_devices))
-            ],
-        )
+    worker_stats = []
+    with tempfile.TemporaryDirectory(prefix="kcatnet_cache_embeddings_") as tmpdir:
+        processes = []
+        stats_paths = []
+        for worker_idx, (shard, device_str) in enumerate(zip(shards, worker_devices)):
+            stats_path = Path(tmpdir) / f"worker_{worker_idx}.json"
+            process = ctx.Process(
+                target=_cache_proteins_worker_to_file,
+                args=(args_dict, shard, device_str, worker_idx, str(stats_path)),
+            )
+            process.start()
+            processes.append(process)
+            stats_paths.append((process, stats_path))
+
+        for process, stats_path in stats_paths:
+            process.join()
+            if process.exitcode != 0:
+                raise RuntimeError(
+                    f"Protein cache worker exited with code {process.exitcode}. "
+                    f"Expected worker stats at {stats_path}"
+                )
+            if not stats_path.exists():
+                raise RuntimeError(f"Protein cache worker completed without writing stats: {stats_path}")
+
+            with open(stats_path, "r", encoding="utf-8") as handle:
+                worker_payload = json.load(handle)
+
+            if not worker_payload.get("ok"):
+                raise RuntimeError(
+                    f"{worker_payload['worker']} failed: {worker_payload['error']}\n{worker_payload['traceback']}"
+                )
+            worker_stats.append(worker_payload["stats"])
 
     written = sum(item["written"] for item in worker_stats)
     for item in worker_stats:
