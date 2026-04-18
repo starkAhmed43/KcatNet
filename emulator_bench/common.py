@@ -124,6 +124,16 @@ def _difficulty_labels_for_thresholds(names: List[str]) -> Dict[str, str]:
     return labels
 
 
+def _flat_split_label(split_group: str) -> str:
+    if split_group == "random_splits":
+        return "random"
+    if split_group == "group_shuffle_splits":
+        return "group_shuffle"
+    if split_group.endswith("_splits"):
+        return split_group[: -len("_splits")]
+    return split_group
+
+
 def normalize_threshold_args(thresholds: Optional[Iterable[str]] = None, threshold: Optional[str] = None) -> Optional[List[str]]:
     values: List[str] = []
     if thresholds is not None:
@@ -155,30 +165,22 @@ def discover_split_jobs(
         if not group_dir.exists():
             continue
 
-        if split_group == "random_splits" or split_group == "group_shuffle_splits":
-            train_path = _find_split_file(group_dir, "train")
-            val_path = _find_split_file(group_dir, "val")
-            test_path = _find_split_file(group_dir, "test")
-            if train_path and val_path and test_path:
-                jobs.append(
-                    {
-                        "split_group": split_group,
-                        "split_name": (
-                            "random"
-                            if split_group == "random_splits"
-                            else "group_shuffle"
-                        ),
-                        "difficulty": (
-                            "random"
-                            if split_group == "random_splits"
-                            else "group_shuffle"
-                        ),
-                        "root_dir": str(group_dir),
-                        "train_path": str(train_path),
-                        "val_path": str(val_path),
-                        "test_path": str(test_path),
-                    }
-                )
+        train_path = _find_split_file(group_dir, "train")
+        val_path = _find_split_file(group_dir, "val")
+        test_path = _find_split_file(group_dir, "test")
+        if train_path and val_path and test_path:
+            label = _flat_split_label(split_group)
+            jobs.append(
+                {
+                    "split_group": split_group,
+                    "split_name": label,
+                    "difficulty": label,
+                    "root_dir": str(group_dir),
+                    "train_path": str(train_path),
+                    "val_path": str(val_path),
+                    "test_path": str(test_path),
+                }
+            )
             continue
 
         candidate_dirs = []
@@ -225,7 +227,7 @@ def resolve_single_split_job(base_dir: Path, split_group: str, threshold: Option
     if not jobs:
         detail = f"{split_group}/{threshold}" if threshold else split_group
         raise FileNotFoundError(f"No split job discovered for {detail} in {base_dir}")
-    if split_group == "random_splits":
+    if split_group == "random_splits" or len(jobs) == 1:
         return jobs[0]
     if threshold is None:
         available = ", ".join(job["split_name"] for job in jobs)
