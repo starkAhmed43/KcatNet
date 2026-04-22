@@ -557,7 +557,7 @@ def _write_global_summaries(output_root: Path, results: list[dict]) -> None:
     runs_df = pd.DataFrame(results)
     runs_df.to_csv(output_root / "runs_status.csv", index=False)
 
-    completed = runs_df[runs_df["status"] == "completed"] if not runs_df.empty else pd.DataFrame()
+    completed = runs_df[runs_df["status"].isin(["completed", "skipped_exists"])] if not runs_df.empty else pd.DataFrame()
     if completed.empty:
         return
 
