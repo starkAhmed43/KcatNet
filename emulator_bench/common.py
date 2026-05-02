@@ -27,6 +27,8 @@ DEFAULT_SPLIT_GROUPS = [
     "group_shuffle_splits",
 ]
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config_KcatNet.json"
+RANDOM_SPLIT_GROUP_ALIAS = "random_splits"
+RANDOM_SPLIT_GROUP_PREFIX = "random_splits_grouped_"
 
 
 def _stable_hash(text: str) -> str:
@@ -125,13 +127,50 @@ def _difficulty_labels_for_thresholds(names: List[str]) -> Dict[str, str]:
 
 
 def _flat_split_label(split_group: str) -> str:
-    if split_group == "random_splits":
+    if is_random_split_group(split_group):
         return "random"
     if split_group == "group_shuffle_splits":
         return "group_shuffle"
     if split_group.endswith("_splits"):
         return split_group[: -len("_splits")]
     return split_group
+
+
+def is_random_split_group(split_group: str) -> bool:
+    split_group = str(split_group)
+    return split_group == RANDOM_SPLIT_GROUP_ALIAS or split_group.startswith(RANDOM_SPLIT_GROUP_PREFIX)
+
+
+def expand_split_groups(base_dir: Path, split_groups: Iterable[str]) -> List[str]:
+    expanded: List[str] = []
+    seen = set()
+    grouped_random_dirs: Optional[List[str]] = None
+
+    def add(split_group: str) -> None:
+        if split_group not in seen:
+            seen.add(split_group)
+            expanded.append(split_group)
+
+    for split_group in split_groups:
+        split_group = str(split_group)
+        if split_group != RANDOM_SPLIT_GROUP_ALIAS:
+            add(split_group)
+            continue
+
+        if grouped_random_dirs is None:
+            grouped_random_dirs = sorted(
+                child.name
+                for child in Path(base_dir).glob(f"{RANDOM_SPLIT_GROUP_PREFIX}*")
+                if child.is_dir()
+            )
+
+        if grouped_random_dirs:
+            for grouped_split_group in grouped_random_dirs:
+                add(grouped_split_group)
+        elif (Path(base_dir) / RANDOM_SPLIT_GROUP_ALIAS).exists():
+            add(RANDOM_SPLIT_GROUP_ALIAS)
+
+    return expanded
 
 
 def normalize_threshold_args(thresholds: Optional[Iterable[str]] = None, threshold: Optional[str] = None) -> Optional[List[str]]:
@@ -156,7 +195,7 @@ def discover_split_jobs(
     split_groups: Optional[Iterable[str]] = None,
     thresholds: Optional[Iterable[str]] = None,
 ) -> List[Dict[str, str]]:
-    split_groups = list(split_groups or DEFAULT_SPLIT_GROUPS)
+    split_groups = expand_split_groups(Path(base_dir), split_groups or DEFAULT_SPLIT_GROUPS)
     threshold_filter = list(thresholds) if thresholds is not None else None
     jobs: List[Dict[str, str]] = []
 
@@ -222,12 +261,17 @@ def discover_split_jobs(
 
 
 def resolve_single_split_job(base_dir: Path, split_group: str, threshold: Optional[str] = None) -> Dict[str, str]:
-    threshold_filter = None if split_group == "random_splits" else normalize_threshold_args(threshold=threshold)
+    threshold_filter = None if is_random_split_group(split_group) else normalize_threshold_args(threshold=threshold)
     jobs = discover_split_jobs(base_dir, split_groups=[split_group], thresholds=threshold_filter)
     if not jobs:
         detail = f"{split_group}/{threshold}" if threshold else split_group
         raise FileNotFoundError(f"No split job discovered for {detail} in {base_dir}")
-    if split_group == "random_splits" or len(jobs) == 1:
+    if split_group == RANDOM_SPLIT_GROUP_ALIAS and len(jobs) > 1:
+        available = ", ".join(job["split_group"] for job in jobs)
+        raise ValueError(
+            f"Multiple grouped random split jobs found for {split_group}. Specify one of: {available}"
+        )
+    if is_random_split_group(split_group) or len(jobs) == 1:
         return jobs[0]
     if threshold is None:
         available = ", ".join(job["split_name"] for job in jobs)
